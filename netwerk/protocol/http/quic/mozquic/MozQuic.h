@@ -30,12 +30,13 @@ extern "C" {
   const char mozquic_alpn[] = "hq-03";
 
   enum {
-    MOZQUIC_OK = 0,
-    MOZQUIC_ERR_GENERAL = 1,
-    MOZQUIC_ERR_INVALID = 2,
-    MOZQUIC_ERR_MEMORY  = 3,
-    MOZQUIC_ERR_IO      = 4,
-    MOZQUIC_ERR_CRYPTO  = 5,
+    MOZQUIC_OK           = 0,
+    MOZQUIC_ERR_GENERAL  = 1,
+    MOZQUIC_ERR_INVALID  = 2,
+    MOZQUIC_ERR_MEMORY   = 3,
+    MOZQUIC_ERR_IO       = 4,
+    MOZQUIC_ERR_CRYPTO   = 5,
+    MOZQUIC_ERR_VERSION  = 6,
   };
 
   typedef void mozquic_connection_t;

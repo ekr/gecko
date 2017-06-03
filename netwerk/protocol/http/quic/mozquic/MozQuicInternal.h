@@ -53,10 +53,6 @@ class MozQuicStreamPair;
 class MozQuic final : public MozQuicWriter
 {
 public:
-  // todo handle more than 1
-  static const uint32_t kMozQuicVersion1 = 0xf123f0c5;
-  static const uint32_t kMozQuicIetfID3 = 0xff000003;
-
   static const uint32_t kMozQuicMTU = 1280; // todo pmtud
   static const uint32_t kMozQuicMSS = 16384;
 
@@ -97,7 +93,7 @@ private:
   void AckScoreboard(uint64_t num);
   void MaybeSendAck();
 
-  uint32_t Transmit(unsigned char *, uint32_t len);
+  uint32_t Transmit(unsigned char *, uint32_t len, struct sockaddr_in *peer);
   uint32_t RetransmitTimer();
   void Acknowledge(unsigned char *, uint32_t len, LongHeaderData &);
   uint32_t AckPiggyBack(unsigned char *pkt, uint32_t avail,
@@ -123,6 +119,9 @@ private:
   void Log(char *);
   int Bind();
   bool VersionOK(uint32_t proposed);
+  uint32_t GenerateVersionNegotiation(LongHeaderData &clientHeader, struct sockaddr_in *peer);
+  uint32_t ProcessVersionNegotiation(unsigned char *pkt, uint32_t pktSize, LongHeaderData &header);
+
   MozQuic *Accept(struct sockaddr_in *peer);
 
   mozquic_socket_t mFD;
