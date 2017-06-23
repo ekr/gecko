@@ -109,14 +109,15 @@ private:
   uint32_t Transmit(unsigned char *, uint32_t len, struct sockaddr_in *peer);
   uint32_t RetransmitTimer();
   uint32_t ClearOldInitialConnetIdsTimer();
-  void Acknowledge(unsigned char *, uint32_t len, LongHeaderData &);
+  void Acknowledge(uint64_t packetNum, keyPhase kp);
   uint32_t AckPiggyBack(unsigned char *pkt, uint64_t pktNumber, uint32_t avail, keyPhase kp, uint32_t &used);
   uint32_t Recv(unsigned char *, uint32_t len, uint32_t &outLen, struct sockaddr_in *peer);
   int ProcessServerCleartext(unsigned char *, uint32_t size, LongHeaderData &);
   int ProcessClientInitial(unsigned char *, uint32_t size, struct sockaddr_in *peer,
                            LongHeaderData &, MozQuic **outSession);
   int ProcessClientCleartext(unsigned char *pkt, uint32_t pktSize, LongHeaderData &);
-  int IntakeStream0(unsigned char *, uint32_t size);
+  uint32_t ProcessGeneralDecoded(unsigned char *, uint32_t size);
+  uint32_t ProcessGeneral(unsigned char *, uint32_t size);
   bool IntegrityCheck(unsigned char *, uint32_t size);
   void ProcessAck(class FrameHeaderData &result, unsigned char *framePtr);
 

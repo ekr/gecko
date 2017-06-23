@@ -209,11 +209,9 @@ MozQuic::Shutdown(uint32_t code, const char *reason)
   // short header with connid kp = 0, 4 bytes of packetnumber
   pkt[0] = 0x43;
   
-  // client connID echo'd from client
   tmp64 = htonll(mConnectionID);
   memcpy(pkt + 1, &tmp64, 8);
 
-  // 32 packet number echo'd from client
   tmp32 = htonl(mNextTransmitPacketNumber & 0xffffffff);
   memcpy(pkt + 9, &tmp32, 4);
 
@@ -417,11 +415,8 @@ MozQuic::Intake()
       if (!session) {
         rv = MOZQUIC_ERR_GENERAL;
       }
-#if 0
-      todo
-      session->Acknowledge(pkt, pktSize, longHeader);
-      rv = session->ProcessGeneral(pkt + 17, pktSize - 17);
-#endif
+      session->Acknowledge(shortHeader.mPacketNumber, keyPhase1Rtt);
+      rv = session->ProcessGeneral(pkt + shortHeader.mHeaderSize, pktSize - shortHeader.mHeaderSize);
         
     } else {
       if (pktSize < 17) {
@@ -496,7 +491,7 @@ MozQuic::Intake()
         rv = session->ProcessClientInitial(pkt, pktSize, &client, longHeader, &session);
         // ack after processing - find new session
         if (rv == MOZQUIC_OK) {
-          session->Acknowledge(pkt, pktSize, longHeader);
+          session->Acknowledge(longHeader.mPacketNumber, keyPhaseUnprotected);
         }
         break;
       case PACKET_TYPE_SERVER_STATELESS_RETRY:
@@ -504,15 +499,15 @@ MozQuic::Intake()
         // todo mvp
         break;
       case PACKET_TYPE_SERVER_CLEARTEXT:
-        session->Acknowledge(pkt, pktSize, longHeader);
+        session->Acknowledge(longHeader.mPacketNumber, keyPhaseUnprotected);
         rv = session->ProcessServerCleartext(pkt, pktSize, longHeader);
         break;
       case PACKET_TYPE_CLIENT_CLEARTEXT:
-        session->Acknowledge(pkt, pktSize, longHeader);
+        session->Acknowledge(longHeader.mPacketNumber, keyPhaseUnprotected);
         rv = session->ProcessClientCleartext(pkt, pktSize, longHeader);
         break;
       case PACKET_TYPE_1RTT_PROTECTED_KP0:
-        session->Acknowledge(pkt, pktSize, longHeader);
+        session->Acknowledge(longHeader.mPacketNumber, keyPhase1Rtt);
         rv = session->ProcessGeneral(pkt + 17, pktSize - 17);
         break;        
 
@@ -746,22 +741,18 @@ MozQuic::Unprotected(MozQuic::LongHeaderType type)
 }
 
 void
-MozQuic::Acknowledge(unsigned char *pkt, uint32_t pktLen, LongHeaderData &header)
+MozQuic::Acknowledge(uint64_t packetNum, keyPhase kp)
 {
   assert(mIsChild || mIsClient);
-  // todo assumes long header
-  if (pktLen < 17) {
-    return;
-  }
-  if (header.mPacketNumber > mNextRecvPacketNumber) {
-    mNextRecvPacketNumber = header.mPacketNumber + 1;
+
+  if (packetNum > mNextRecvPacketNumber) {
+    mNextRecvPacketNumber = packetNum + 1;
   }
 
-  fprintf(stderr,"%p GEN ACK FOR %lX\n", this, header.mPacketNumber);
+  fprintf(stderr,"%p GEN ACK FOR %lX\n", this, packetNum);
 
   // put this packetnumber on the scoreboard along with timestamp
-  assert(Unprotected(header.mType));
-  AckScoreboard(header.mPacketNumber, keyPhaseUnprotected);
+  AckScoreboard(packetNum, kp);
 }
 
 uint32_t
@@ -1003,7 +994,7 @@ MozQuic::ProcessServerCleartext(unsigned char *pkt, uint32_t pktSize, LongHeader
   mConnectionID = header.mConnectionID;
   // todo log change
   
-  return IntakeStream0(pkt + 17, pktSize - 17);
+  return ProcessGeneralDecoded(pkt + 17, pktSize - 17);
 }
 
 void
@@ -1089,8 +1080,15 @@ MozQuic::ProcessAck(FrameHeaderData &result, unsigned char *framePtr)
   
 }
 
-int
-MozQuic::IntakeStream0(unsigned char *pkt, uint32_t pktSize) 
+uint32_t
+MozQuic::ProcessGeneral(unsigned char *pkt, uint32_t pktSize)
+{
+  // todo prm decode! ALERT
+  return ProcessGeneralDecoded(pkt, pktSize);
+}
+
+uint32_t
+MozQuic::ProcessGeneralDecoded(unsigned char *pkt, uint32_t pktSize) 
 {
   // used by both client and server
   unsigned char *endpkt = pkt + pktSize;
@@ -1110,6 +1108,7 @@ MozQuic::IntakeStream0(unsigned char *pkt, uint32_t pktSize)
     } else if (result.mType == FRAME_TYPE_STREAM) {
       sendAck = true;
       if (result.u.mStream.mStreamID != 0) {
+        // todo obviously
         RaiseError(MOZQUIC_ERR_GENERAL, (char *) "stream 0 expected");
         return MOZQUIC_ERR_GENERAL;
       }
@@ -1298,7 +1297,7 @@ MozQuic::ProcessClientInitial(unsigned char *pkt, uint32_t pktSize,
   }
   MozQuic *child = Accept(clientAddr, header.mConnectionID);
   child->mConnectionState = SERVER_STATE_1RTT;
-  child->IntakeStream0(pkt + 17, pktSize - 17);
+  child->ProcessGeneralDecoded(pkt + 17, pktSize - 17);
   assert(mNewConnCB); // todo handle err
   mNewConnCB(mClosure, child);
   *childSession = child;
@@ -1322,7 +1321,7 @@ MozQuic::ProcessClientCleartext(unsigned char *pkt, uint32_t pktSize, LongHeader
     return MOZQUIC_ERR_GENERAL;
   }
   
-  return IntakeStream0(pkt + 17, pktSize - 17);
+  return ProcessGeneralDecoded(pkt + 17, pktSize - 17);
 }
 
 uint32_t
