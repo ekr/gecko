@@ -54,7 +54,7 @@ int main()
       fprintf(stderr,"IO reported failure\n");
       break;
     }
-  } while (1);
+  } while (i < 3000);
   mozquic_destroy_connection(c);
   return 0;
 }

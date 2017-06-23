@@ -94,6 +94,7 @@ public:
   void PreferMilestoneVersion();
   void SetIgnorePKI() { mIgnorePKI = true; }
   bool IgnorePKI();
+  void Shutdown(uint32_t, const char *);
 
   uint32_t DoWriter(std::unique_ptr<MozQuicStreamChunk> &p) override;
 private:
@@ -120,7 +121,7 @@ private:
   void ProcessAck(class FrameHeaderData &result, unsigned char *framePtr);
 
   bool ServerState() { return mConnectionState > SERVER_STATE_BREAK; }
-  MozQuic *FindSession(const unsigned char *pkt, uint32_t pktSize, LongHeaderData &header);
+  MozQuic *FindSession(uint64_t cid);
 
   uint64_t Timestamp();
   uint32_t Intake();
@@ -162,8 +163,9 @@ private:
   std::unordered_map<uint64_t, struct InitialClientPacketInfo> mConnectionHashOriginalNew;
 
   uint64_t mConnectionID;
-  uint64_t mNextPacketNumber;
-  uint64_t mOriginalPacketNumber;
+  uint64_t mNextTransmitPacketNumber;
+  uint64_t mOriginalTransmitPacketNumber;
+  uint64_t mNextRecvPacketNumber; // expected
 
   void *mClosure;
   void (*mLogCallback)(mozquic_connection_t *, char *); // todo va arg
@@ -251,6 +253,15 @@ private:
     uint64_t mConnectionID;
     uint64_t mPacketNumber;
     uint32_t mVersion;
+  };
+
+  class ShortHeaderData
+  {
+  public:
+    ShortHeaderData(unsigned char *, uint32_t, uint64_t);
+    uint32_t mHeaderSize;
+    uint64_t mConnectionID;
+    uint64_t mPacketNumber;
   };
 
   class FrameHeaderData
