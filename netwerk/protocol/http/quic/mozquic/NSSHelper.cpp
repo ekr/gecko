@@ -66,17 +66,69 @@ NSSHelper::HandshakeCallback(PRFileDesc *fd, void *client_data)
   SSLNextProtoState state;
   bool didHandshakeFail = false;
 
+  PRFileDesc *tmpFD = fd;
+  while (tmpFD && (tmpFD->identity != nssHelperIdentity)) {
+    tmpFD = tmpFD->lower;
+  }
+  assert(tmpFD);
+  NSSHelper *self = reinterpret_cast<NSSHelper *>(tmpFD->secret);
+
   if (SSL_GetNextProto(fd, &state, buf, &bufLen, 256) != SECSuccess ||
       bufLen != strlen(mozquic_alpn) ||
       memcmp(mozquic_alpn, buf, bufLen)) {
     didHandshakeFail = true;
-  }
+  } else {
+    SSLChannelInfo info;
+    unsigned int secretSize = 48;
 
-  while (fd && (fd->identity != nssHelperIdentity)) {
-    fd = fd->lower;
+    if (SSL_GetChannelInfo(fd, &info, sizeof(info)) != SECSuccess) {
+      didHandshakeFail = true;
+    } else {
+      if (info.cipherSuite == TLS_AES_128_GCM_SHA256) {
+        secretSize = 32;
+      } else if (info.cipherSuite == TLS_AES_256_GCM_SHA384) {
+        secretSize = 48;
+      } else if (info.cipherSuite == TLS_CHACHA20_POLY1305_SHA256) {
+        secretSize = 32;
+      } else {
+        assert(false);
+        didHandshakeFail = true;
+      }
+    }
+
+    const char *label = self->mIsClient ?
+      "EXPORTER-QUIC client 1-RTT Secret" : "EXPORTER-QUIC server 1-RTT Secret";
+    unsigned char initialSecret[48];
+    if (SSL_ExportKeyingMaterial(fd, label, strlen (label),
+                                 false, (const unsigned char *)"", 0, initialSecret, secretSize) != SECSuccess) {
+      didHandshakeFail = true;
+    }
+
+    PK11SymKey *symKey;
+    PK11SlotInfo *slot = PK11_GetInternalSlot(); // todo free?
+    SECItem key_item = {siBuffer, initialSecret, secretSize};
+    symKey = PK11_ImportSymKey(slot, CKM_SSL3_MASTER_KEY_DERIVE, PK11_OriginUnwrap,
+                               CKA_DERIVE, &key_item, NULL);
+
+    // all currently defined aead algorithms have key length of 16
+    unsigned char key[16];
+    SSLHashType hashType = TLS_AES_256_GCM_SHA384 ? ssl_hash_sha384 : ssl_hash_sha256;
+    
+#if 0
+    key = HKDF-Expand-Label(S, "key", "", key_length)
+      iv  = HKDF-Expand-Label(S, "iv", "", iv_length)
+
+
+      SECStatus rv = tls13_HkdfExpandLabelRaw(prk->get(), base_hash, session_hash,
+                                            session_hash_len, label, label_len,
+                                            &output[0], output.size());
+
+    
+    SECStatus rv = tls13_HkdfExpandLabelRaw(symKey, ssl_hash_sha256, "", 0, "key", 3, key, 16);
+
+#endif
   }
-  assert(fd);
-  NSSHelper *self = reinterpret_cast<NSSHelper *>(fd->secret);
+  
   self->mHandshakeComplete = true;
   if (didHandshakeFail) {
     self->mHandshakeFailed = true;
@@ -102,6 +154,7 @@ NSSHelper::NSSHelper(MozQuic *quicSession, const char *originKey)
   , mNSSReady(false)
   , mHandshakeComplete(false)
   , mHandshakeFailed(false)
+  , mIsClient(false)
 {
   PRNetAddr addr;
   memset(&addr,0,sizeof(addr));
@@ -163,6 +216,7 @@ NSSHelper::NSSHelper(MozQuic *quicSession, const char *originKey, bool unused)
   , mNSSReady(false)
   , mHandshakeComplete(false)
   , mHandshakeFailed(false)
+  , mIsClient(true)
 {
   // todo most of this can be put in an init routine shared between c/s
 

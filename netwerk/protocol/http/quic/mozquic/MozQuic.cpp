@@ -826,7 +826,7 @@ MozQuic::HandshakeOutput(unsigned char *buf, uint32_t datalen)
 // this is called by the application when the application is handling
 // the TLS stream (so that it can do more sophisticated handling
 // of certs etc like gecko PSM does). The app is providing the
-// client hello
+// client hello and interpreting the server hello
 void
 MozQuic::HandshakeComplete(uint32_t code)
 {
@@ -838,7 +838,13 @@ MozQuic::HandshakeComplete(uint32_t code)
     RaiseError(MOZQUIC_ERR_GENERAL, (char *)"Handshake complete in wrong state");
     return;
   }
+  if (code != MOZQUIC_OK) {
+    RaiseError(MOZQUIC_ERR_CRYPTO, (char *)"Handshake complete err");
+    return;
+  }
+  
   fprintf(stderr,"CLIENT_STATE_CONNECTED 2\n");
+  // todo prm client km 1 .. need to also provide key material
   mConnectionState = CLIENT_STATE_CONNECTED;
   MaybeSendAck();
 }
@@ -1083,6 +1089,143 @@ MozQuic::ProcessAck(FrameHeaderData &result, unsigned char *framePtr)
 uint32_t
 MozQuic::ProcessGeneral(unsigned char *pkt, uint32_t pktSize)
 {
+#if 0
+
+  
+  SSL_IMPORT SECStatus SSL_GetChannelInfo(PRFileDesc *fd, SSLChannelInfo *info,
+						   PRUintn len);
+sslt.h
+PRUint16 protocolVersion; SSL_LIBRARY_VERSION_TLS_1_3
+PRUint16 cipherSuite; -> one of these
+#define TLS_AES_128_GCM_SHA256                0x1301
+#define TLS_AES_256_GCM_SHA384                0x1302
+#define TLS_CHACHA20_POLY1305_SHA256          0x1303
+
+and hash sizes are 32/48 bytes
+
+ http://searchfox.org/nss/source/lib/ssl/tls13hkdf.c#125
+ http://searchfox.org/nss/source/gtests/ssl_gtest/tls_hkdf_unittest.cc
+ http://searchfox.org/nss/source/lib/ssl/tls13con.c#4123
+
+test has key1data and key2data of 48/384
+
+initial secrets (S)
+  client_pp_secret_0 = TLS-Exporter("EXPORTER-QUIC client 1-RTT Secret",  "", Hash.length)
+  server_pp_secret_0 = TLS-Exporter("EXPORTER-QUIC server 1-RTT Secret",  "", Hash.length)
+
+/* Export keying material according to RFC 5705.
+** fd must correspond to a TLS 1.0 or higher socket and out must
+** already be allocated. If hasContext is false, it uses the no-context
+** construction from the RFC and ignores the context and contextLen
+** arguments.
+*/
+SSL_IMPORT SECStatus SSL_ExportKeyingMaterial(PRFileDesc *fd,
+                                              const char *label,
+                                              unsigned int labelLen,
+                                              PRBool hasContext,
+                                              const unsigned char *context,
+                                              unsigned int contextLen,
+                                              unsigned char *out,
+                                              unsigned int outLen);
+
+outlen according to hash sizes from above
+
+key and iv  
+  key = HKDF-Expand-Label(S, "key", "", key_length)
+  iv  = HKDF-Expand-Label(S, "iv", "", iv_length)
+
+PRK IS A pk11symkey
+      SECStatus rv = tls13_HkdfExpandLabelRaw(prk->get(), base_hash, session_hash,
+                                            session_hash_len, label, label_len,
+                                            &output[0], output.size());
+
+base_hash = ssl_hash_sha256/384
+session_hash = "", 0
+label = "iv" or "key" and label_len is strlen
+  
+output  keylength is aead key size (16)
+#define TLS_AES_128_GCM_SHA256                0x1301
+#define TLS_AES_256_GCM_SHA384                0x1302
+#define TLS_CHACHA20_POLY1305_SHA256          0x1303
+  all are aead_128 (16)
+  
+output ivlength larger of 8 bytes or n_min 5.3 of tls
+  n_min requires rfc 5116 TODO
+  n_min is specific to aead 
+n_min for all known suites is 12
+                
+SECRETS - use tls exporters 7,5 of 1.3
+ like 5705, except use hkdf instead of prf(1.2)
+ 
+  
+  KEYS
+   keylength is aead key size
+  key = HKDF-Expand-Label(S, "key", "", key_length)
+  HOWTO
+  IV
+  larger of 8 bytes or n_min 5.3 of tls
+  iv  = HKDF-Expand-Label(S, "iv", "", iv_length)
+HOWTO
+  
+AEAD
+  TLS_AES_128_GCM_SHA256, the AEAD_AES_128_GCM function is used. SHA256 is hkdf hash
+
+  The nonce, N, is formed by combining the packet protection IV (either client_pp_iv_n or server_pp_iv_n) with the packet number. The 64 bits of the reconstructed QUIC packet number in network byte order is left-padded with zeros to the size of the IV. The exclusive OR of the padded packet number and the IV forms the AEAD nonce.
+
+  The associated data, A, for the AEAD is the contents of the QUIC header, starting from the flags octet in the common header.
+
+                                    A is the quic header (long or short)
+                                    
+  The input plaintext, P, for the AEAD is the contents of the QUIC frame following the packet number, as described in [QUIC-TRANSPORT].
+P is the body.. the resulting C is swapped in for P
+                                    
+to generate pk11symkey                                    
+  ScopedPK11SymKey k1_;
+ ScopedPK11SlotInfo slot_;      PK11_GetInternalSlot()) (free?)
+   ImportKey(&k1_, kKey1, slot_.get()); // KKey1 is 48 bytes of K from above
+
+ static void ImportKey(ScopedPK11SymKey* to, const DataBuffer& key,
+    PK11SlotInfo* slot) {
+    SECItem key_item = {siBuffer, const_cast<uint8_t*>(key.data()),
+    static_cast<unsigned int>(key.len())};
+
+  PK11SymKey* inner =
+      PK11_ImportSymKey(slot, CKM_SSL3_MASTER_KEY_DERIVE, PK11_OriginUnwrap,
+                        CKA_DERIVE, &key_item, NULL);
+  ASSERT_NE(nullptr, inner);
+  to->reset(inner);
+}
+
+ tls_protect.cc test
+
+
+   key is pk11symkey
+   mech is ???   AeadCipherChacha20Poly1305() : AeadCipher(CKM_NSS_CHACHA20_POLY1305) {}
+   AeadCipherAesGcm() : AeadCipher(CKM_AES_GCM) {}
+
+  CK_GCM_PARAMS aeadParams;
+  unsigned char nonce[12];
+
+  memset(&aeadParams, 0, sizeof(aeadParams));
+  aeadParams.pIv = nonce;
+  aeadParams.ulIvLen = sizeof(nonce);
+  aeadParams.pAAD = NULL;
+  aeadParams.ulAADLen = 0;
+  aeadParams.ulTagBits = 128;
+  
+    rv = PK11_Decrypt(key_, mech_, &param, out, &uoutlen, maxlen, in, inlen);
+ 
+  SECStatus PK11_Encrypt(PK11SymKey *symKey,
+                       CK_MECHANISM_TYPE mechanism, SECItem *param,
+                       unsigned char *out, unsigned int *outLen,
+                       unsigned int maxLen,
+                       const unsigned char *data, unsigned int dataLen);
+        rv = PK11_Encrypt(keys->write_key, mechanism, &param,
+                          out, &uOutLen, maxout, in, inlen);
+
+
+
+#endif
   // todo prm decode! ALERT
   return ProcessGeneralDecoded(pkt, pktSize);
 }

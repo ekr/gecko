@@ -42,6 +42,7 @@ private:
   bool                 mNSSReady;
   bool                 mHandshakeComplete;
   bool                 mHandshakeFailed; // complete but bad above nss
+  bool                 mIsClient;
 };
 
 } //namespace

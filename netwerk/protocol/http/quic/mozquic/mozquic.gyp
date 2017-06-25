@@ -24,6 +24,7 @@
          'MozQuic.cpp',
          'MozQuicStream.cpp',
          'NSSHelper.cpp',
+         'Protect.cpp',
         ],
      },
    ],
