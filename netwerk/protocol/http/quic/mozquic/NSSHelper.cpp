@@ -15,6 +15,7 @@
 #include "secmod.h"
 #include "assert.h"
 
+
 #if NSS_VMAJOR < 3 || (NSS_VMINOR < 32 && NSS_VMAJOR == 3)
 fail complie;
 #endif
@@ -29,6 +30,54 @@ fail complie;
 */
 
 // todo runtime enforce too
+
+#if 0
+extern "C" 
+{
+  
+SECStatus
+tls13_HkdfExpandLabelRaw(PK11SymKey *prk, SSLHashType baseHash,
+                         const PRUint8 *handshakeHash, unsigned int handshakeHashLen,
+                         const char *label, unsigned int labelLen,
+                         unsigned char *output, unsigned int outputLen)
+{
+    PK11SymKey *derived = NULL;
+    SECItem *rawkey;
+    SECStatus rv;
+
+    rv = tls13_HkdfExpandLabel(prk, baseHash, handshakeHash, handshakeHashLen,
+                               label, labelLen,
+                               kTlsHkdfInfo[baseHash].pkcs11Mech, outputLen,
+                               &derived);
+    if (rv != SECSuccess || !derived) {
+        goto abort;
+    }
+
+    rv = PK11_ExtractKeyValue(derived);
+    if (rv != SECSuccess) {
+        goto abort;
+    }
+
+    rawkey = PK11_GetKeyData(derived);
+    if (!rawkey) {
+        goto abort;
+    }
+
+    PORT_Assert(rawkey->len == outputLen);
+    memcpy(output, rawkey->data, outputLen);
+    PK11_FreeSymKey(derived);
+
+    return SECSuccess;
+
+abort:
+    if (derived) {
+        PK11_FreeSymKey(derived);
+    }
+    PORT_SetError(SSL_ERROR_SYM_KEY_CONTEXT_FAILURE);
+    return SECFailure;
+}
+}
+#endif
 
 namespace mozquic {
         
@@ -113,8 +162,10 @@ NSSHelper::HandshakeCallback(PRFileDesc *fd, void *client_data)
     // all currently defined aead algorithms have key length of 16
     unsigned char key[16];
     SSLHashType hashType = TLS_AES_256_GCM_SHA384 ? ssl_hash_sha384 : ssl_hash_sha256;
-    
+
 #if 0
+    tls13_HkdfExpandLabelRaw(symKey, ssl_hash_sha256, "", 0, "key", 3, key, 16);
+
     key = HKDF-Expand-Label(S, "key", "", key_length)
       iv  = HKDF-Expand-Label(S, "iv", "", iv_length)
 
