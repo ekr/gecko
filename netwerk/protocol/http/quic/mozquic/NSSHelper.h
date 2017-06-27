@@ -43,6 +43,9 @@ private:
   bool                 mHandshakeComplete;
   bool                 mHandshakeFailed; // complete but bad above nss
   bool                 mIsClient;
+  PK11SymKey          *mSymmetricKey; // todo leaked!
+  unsigned char       mPacketProtectionKey[16];
+  unsigned char       mPacketProtectionIV[12];
 };
 
 } //namespace

@@ -31,53 +31,166 @@ fail complie;
 
 // todo runtime enforce too
 
-#if 0
 extern "C" 
 {
+// All of this hkdf code is copied from NSS
+
+static const struct {
+  SSLHashType hash;
+  CK_MECHANISM_TYPE pkcs11Mech;
+  unsigned int hashSize;
+} kTlsHkdfInfo[] = {
+  { ssl_hash_none, 0, 0 },
+  { ssl_hash_md5, 0, 0 },
+  { ssl_hash_sha1, 0, 0 },
+  { ssl_hash_sha224, 0 },
+  { ssl_hash_sha256, CKM_NSS_HKDF_SHA256, 32 },
+  { ssl_hash_sha384, CKM_NSS_HKDF_SHA384, 48 },
+  { ssl_hash_sha512, CKM_NSS_HKDF_SHA512, 64 }
+};
+
+/* Helper function to encode an unsigned integer into a buffer. */
+static PRUint8 *
+ssl_EncodeUintX(PRUint64 value, unsigned int bytes, PRUint8 *to)
+{
+  PRUint64 encoded;
+
+  PORT_Assert(bytes > 0 && bytes <= sizeof(encoded));
+
+  encoded = mozquic::htonll(value);
+  memcpy(to, ((unsigned char *)(&encoded)) + (sizeof(encoded) - bytes), bytes);
+  return to + bytes;
+}
   
-SECStatus
+static SECStatus
+tls13_HkdfExpandLabel(PK11SymKey *prk, SSLHashType baseHash,
+                      const PRUint8 *handshakeHash, unsigned int handshakeHashLen,
+                      const char *label, unsigned int labelLen,
+                      CK_MECHANISM_TYPE algorithm, unsigned int keySize,
+                      PK11SymKey **keyp)
+{
+  CK_NSS_HKDFParams params;
+  SECItem paramsi = { siBuffer, NULL, 0 };
+  /* Size of info array needs to be big enough to hold the maximum Prefix,
+   * Label, plus HandshakeHash. If it's ever to small, the code will abort.
+   */
+  PRUint8 info[256];
+  PRUint8 *ptr = info;
+  unsigned int infoLen;
+  PK11SymKey *derived;
+  const char *kLabelPrefix = "tls13 ";
+  const unsigned int kLabelPrefixLen = strlen(kLabelPrefix);
+
+  if (handshakeHash) {
+    if (handshakeHashLen > 255) {
+      PORT_Assert(0);
+      return SECFailure;
+    }
+  } else {
+    PORT_Assert(!handshakeHashLen);
+  }
+
+  /*
+   *  [draft-ietf-tls-tls13-11] Section 7.1:
+   *
+   *  HKDF-Expand-Label(Secret, Label, HashValue, Length) =
+   *       HKDF-Expand(Secret, HkdfLabel, Length)
+   *
+   *  Where HkdfLabel is specified as:
+   *
+   *  struct HkdfLabel {
+   *    uint16 length;
+   *    opaque label<9..255>;
+   *    opaque hash_value<0..255>;
+   *  };
+   *
+   *  Where:
+   *  - HkdfLabel.length is Length
+   *  - HkdfLabel.hash_value is HashValue.
+   *  - HkdfLabel.label is "TLS 1.3, " + Label
+   *
+   */
+  infoLen = 2 + 1 + kLabelPrefixLen + labelLen + 1 + handshakeHashLen;
+  if (infoLen > sizeof(info)) {
+    PORT_Assert(0);
+    goto abort;
+  }
+
+  ptr = ssl_EncodeUintX(keySize, 2, ptr);
+  ptr = ssl_EncodeUintX(labelLen + kLabelPrefixLen, 1, ptr);
+  PORT_Memcpy(ptr, kLabelPrefix, kLabelPrefixLen);
+  ptr += kLabelPrefixLen;
+  PORT_Memcpy(ptr, label, labelLen);
+  ptr += labelLen;
+  ptr = ssl_EncodeUintX(handshakeHashLen, 1, ptr);
+  if (handshakeHash) {
+    PORT_Memcpy(ptr, handshakeHash, handshakeHashLen);
+    ptr += handshakeHashLen;
+  }
+  PORT_Assert((ptr - info) == infoLen);
+
+  params.bExtract = CK_FALSE;
+  params.bExpand = CK_TRUE;
+  params.pInfo = info;
+  params.ulInfoLen = infoLen;
+  paramsi.data = (unsigned char *)&params;
+  paramsi.len = sizeof(params);
+
+  derived = PK11_DeriveWithFlags(prk, kTlsHkdfInfo[baseHash].pkcs11Mech,
+                                 &paramsi, algorithm,
+                                 CKA_DERIVE, keySize,
+                                 CKF_SIGN | CKF_VERIFY);
+  if (!derived)
+    return SECFailure;
+
+  *keyp = derived;
+  return SECSuccess;
+
+abort:
+    return SECFailure;
+}
+  
+static SECStatus
 tls13_HkdfExpandLabelRaw(PK11SymKey *prk, SSLHashType baseHash,
                          const PRUint8 *handshakeHash, unsigned int handshakeHashLen,
                          const char *label, unsigned int labelLen,
                          unsigned char *output, unsigned int outputLen)
 {
-    PK11SymKey *derived = NULL;
-    SECItem *rawkey;
-    SECStatus rv;
+  PK11SymKey *derived = NULL;
+  SECItem *rawkey;
+  SECStatus rv;
 
-    rv = tls13_HkdfExpandLabel(prk, baseHash, handshakeHash, handshakeHashLen,
-                               label, labelLen,
-                               kTlsHkdfInfo[baseHash].pkcs11Mech, outputLen,
-                               &derived);
-    if (rv != SECSuccess || !derived) {
-        goto abort;
-    }
+  rv = tls13_HkdfExpandLabel(prk, baseHash, handshakeHash, handshakeHashLen,
+                             label, labelLen,
+                             kTlsHkdfInfo[baseHash].pkcs11Mech, outputLen,
+                             &derived);
+  if (rv != SECSuccess || !derived) {
+    goto abort;
+  }
 
-    rv = PK11_ExtractKeyValue(derived);
-    if (rv != SECSuccess) {
-        goto abort;
-    }
+  rv = PK11_ExtractKeyValue(derived);
+  if (rv != SECSuccess) {
+    goto abort;
+  }
 
-    rawkey = PK11_GetKeyData(derived);
-    if (!rawkey) {
-        goto abort;
-    }
+  rawkey = PK11_GetKeyData(derived);
+  if (!rawkey) {
+    goto abort;
+  }
 
-    PORT_Assert(rawkey->len == outputLen);
-    memcpy(output, rawkey->data, outputLen);
-    PK11_FreeSymKey(derived);
+  PORT_Assert(rawkey->len == outputLen);
+  memcpy(output, rawkey->data, outputLen);
+  PK11_FreeSymKey(derived);
 
-    return SECSuccess;
+  return SECSuccess;
 
 abort:
-    if (derived) {
-        PK11_FreeSymKey(derived);
-    }
-    PORT_SetError(SSL_ERROR_SYM_KEY_CONTEXT_FAILURE);
-    return SECFailure;
+  if (derived) {
+    PK11_FreeSymKey(derived);
+  }
+  return SECFailure;
 }
-}
-#endif
+} // extern c - nss include
 
 namespace mozquic {
         
@@ -153,31 +266,25 @@ NSSHelper::HandshakeCallback(PRFileDesc *fd, void *client_data)
       didHandshakeFail = true;
     }
 
-    PK11SymKey *symKey;
     PK11SlotInfo *slot = PK11_GetInternalSlot(); // todo free?
     SECItem key_item = {siBuffer, initialSecret, secretSize};
-    symKey = PK11_ImportSymKey(slot, CKM_SSL3_MASTER_KEY_DERIVE, PK11_OriginUnwrap,
-                               CKA_DERIVE, &key_item, NULL);
+    self->mSymmetricKey = PK11_ImportSymKey(slot, CKM_SSL3_MASTER_KEY_DERIVE, PK11_OriginUnwrap,
+                                            CKA_DERIVE, &key_item, NULL);
 
     // all currently defined aead algorithms have key length of 16
-    unsigned char key[16];
     SSLHashType hashType = TLS_AES_256_GCM_SHA384 ? ssl_hash_sha384 : ssl_hash_sha256;
+    if (tls13_HkdfExpandLabelRaw(self->mSymmetricKey, hashType,
+                                 (const unsigned char *)"", 0, "key", 3,
+                                 self->mPacketProtectionKey, sizeof(self->mPacketProtectionKey)) != SECSuccess) {
+      didHandshakeFail = true;
+    }
+    // iv length is max(8, n_min) - n_min is aead specific, but is 12 for everything currently known
+    if (tls13_HkdfExpandLabelRaw(self->mSymmetricKey, hashType,
+                                 (const unsigned char *)"", 0, "iv", 3,
+                                 self->mPacketProtectionIV, sizeof(self->mPacketProtectionIV)) != SECSuccess) {
+      didHandshakeFail = true;
+    }
 
-#if 0
-    tls13_HkdfExpandLabelRaw(symKey, ssl_hash_sha256, "", 0, "key", 3, key, 16);
-
-    key = HKDF-Expand-Label(S, "key", "", key_length)
-      iv  = HKDF-Expand-Label(S, "iv", "", iv_length)
-
-
-      SECStatus rv = tls13_HkdfExpandLabelRaw(prk->get(), base_hash, session_hash,
-                                            session_hash_len, label, label_len,
-                                            &output[0], output.size());
-
-    
-    SECStatus rv = tls13_HkdfExpandLabelRaw(symKey, ssl_hash_sha256, "", 0, "key", 3, key, 16);
-
-#endif
   }
   
   self->mHandshakeComplete = true;
@@ -206,6 +313,7 @@ NSSHelper::NSSHelper(MozQuic *quicSession, const char *originKey)
   , mHandshakeComplete(false)
   , mHandshakeFailed(false)
   , mIsClient(false)
+  , mSymmetricKey(nullptr)
 {
   PRNetAddr addr;
   memset(&addr,0,sizeof(addr));
@@ -268,6 +376,7 @@ NSSHelper::NSSHelper(MozQuic *quicSession, const char *originKey, bool unused)
   , mHandshakeComplete(false)
   , mHandshakeFailed(false)
   , mIsClient(true)
+  , mSymmetricKey(nullptr)
 {
   // todo most of this can be put in an init routine shared between c/s
 
