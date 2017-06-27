@@ -20,7 +20,7 @@
 fail complie;
 #endif
 
-// the above version is not sufficient - the -20 xbranch hasn't been
+// the above version is not sufficient - the -20 branch hasn't been
 // give a new vminor
 /*
     nss -20 branch
@@ -234,18 +234,24 @@ NSSHelper::HandshakeCallback(PRFileDesc *fd, void *client_data)
   }
   assert(tmpFD);
   NSSHelper *self = reinterpret_cast<NSSHelper *>(tmpFD->secret);
+  SSLHashType hashType;
+  const char *label;
+  unsigned char initialSecret[48];
+  PK11SlotInfo *slot = nullptr;
+  PK11SymKey *secretSKey = nullptr;
+  unsigned int secretSize = 48;
 
   if (SSL_GetNextProto(fd, &state, buf, &bufLen, 256) != SECSuccess ||
       bufLen != strlen(mozquic_alpn) ||
       memcmp(mozquic_alpn, buf, bufLen)) {
-    didHandshakeFail = true;
+    goto failure;
   } else {
     SSLChannelInfo info;
-    unsigned int secretSize = 48;
 
     if (SSL_GetChannelInfo(fd, &info, sizeof(info)) != SECSuccess) {
-      didHandshakeFail = true;
+      goto failure;
     } else {
+      hashType = (info.cipherSuite == TLS_AES_256_GCM_SHA384) ? ssl_hash_sha384 : ssl_hash_sha256;
       if (info.cipherSuite == TLS_AES_128_GCM_SHA256) {
         secretSize = 32;
       } else if (info.cipherSuite == TLS_AES_256_GCM_SHA384) {
@@ -254,44 +260,88 @@ NSSHelper::HandshakeCallback(PRFileDesc *fd, void *client_data)
         secretSize = 32;
       } else {
         assert(false);
-        didHandshakeFail = true;
+        goto failure;
       }
     }
-
-    const char *label = self->mIsClient ?
-      "EXPORTER-QUIC client 1-RTT Secret" : "EXPORTER-QUIC server 1-RTT Secret";
-    unsigned char initialSecret[48];
-    if (SSL_ExportKeyingMaterial(fd, label, strlen (label),
-                                 false, (const unsigned char *)"", 0, initialSecret, secretSize) != SECSuccess) {
-      didHandshakeFail = true;
-    }
-
-    PK11SlotInfo *slot = PK11_GetInternalSlot(); // todo free?
-    SECItem key_item = {siBuffer, initialSecret, secretSize};
-    self->mSymmetricKey = PK11_ImportSymKey(slot, CKM_SSL3_MASTER_KEY_DERIVE, PK11_OriginUnwrap,
-                                            CKA_DERIVE, &key_item, NULL);
-
-    // all currently defined aead algorithms have key length of 16
-    SSLHashType hashType = TLS_AES_256_GCM_SHA384 ? ssl_hash_sha384 : ssl_hash_sha256;
-    if (tls13_HkdfExpandLabelRaw(self->mSymmetricKey, hashType,
-                                 (const unsigned char *)"", 0, "key", 3,
-                                 self->mPacketProtectionKey, sizeof(self->mPacketProtectionKey)) != SECSuccess) {
-      didHandshakeFail = true;
-    }
-    // iv length is max(8, n_min) - n_min is aead specific, but is 12 for everything currently known
-    if (tls13_HkdfExpandLabelRaw(self->mSymmetricKey, hashType,
-                                 (const unsigned char *)"", 0, "iv", 3,
-                                 self->mPacketProtectionIV, sizeof(self->mPacketProtectionIV)) != SECSuccess) {
-      didHandshakeFail = true;
-    }
-
   }
-  
+
+  label = self->mIsClient ? "EXPORTER-QUIC client 1-RTT Secret" : "EXPORTER-QUIC server 1-RTT Secret";
+  slot = PK11_GetInternalSlot();
+  if (!slot ||
+      SSL_ExportKeyingMaterial(fd, label, strlen (label),
+                               false, (const unsigned char *)"", 0, initialSecret, secretSize) != SECSuccess) {
+    goto failure;
+  }
+
+  {
+    SECItem secret_item = {siBuffer, initialSecret, secretSize};
+    secretSKey = PK11_ImportSymKey(slot, CKM_SSL3_MASTER_KEY_DERIVE, PK11_OriginUnwrap,
+                                   CKA_DERIVE, &secret_item, NULL);
+  }
+  PK11_FreeSlot(slot);
+  slot = nullptr;
+
+  if (!secretSKey) {
+    goto failure;
+  }
+
+  unsigned char ppKey[16]; // all currently defined aead algorithms have key length of 16
+  if (tls13_HkdfExpandLabelRaw(secretSKey, hashType,
+                               (const unsigned char *)"", 0, "key", 3,
+                               ppKey, sizeof(ppKey)) != SECSuccess) {
+    goto failure;
+  }
+  // iv length is max(8, n_min) - n_min is aead specific, but is 12 for everything currently known
+  if (tls13_HkdfExpandLabelRaw(secretSKey, hashType,
+                               (const unsigned char *)"", 0, "iv", 3,
+                               self->mPacketProtectionIV, sizeof(self->mPacketProtectionIV)) != SECSuccess) {                                 
+    goto failure;
+  }
+  if (!(slot = PK11_GetInternalSlot())){
+    goto failure;
+  }
+
+  {
+    SECItem ppKey_item = {siBuffer, ppKey, sizeof(ppKey)};
+    self->mPacketProtectionKey0 = PK11_ImportSymKey(slot, CKM_NSS_HKDF_SHA256, PK11_OriginUnwrap,
+                                                    CKA_DERIVE, &ppKey_item, NULL);
+  }
+  PK11_FreeSlot(slot);
+  slot = nullptr;
+  if (secretSKey) {
+    PK11_FreeSymKey(secretSKey);
+  }
+    
   self->mHandshakeComplete = true;
   if (didHandshakeFail) {
     self->mHandshakeFailed = true;
   }
+  return;
+
+failure:
+  self->mHandshakeComplete = true;
+  self->mHandshakeFailed = true;
+
+  if (slot) {
+    PK11_FreeSlot(slot);
+  }
+  if (secretSKey) {
+    PK11_FreeSymKey(secretSKey);
+  }
 }
+
+// todo - if nss helper didn't drive tls, need an api to push secrets into this class
+// e.g. firefox
+uint32_t
+NSSHelper::EncryptBlock(unsigned char *A, uint32_t ALen, unsigned char *P, uint32_t PLen,
+                        unsigned char *out) // out must be PLen in size + tag(16)
+{
+  if (!mNSSReady || !mHandshakeComplete || mHandshakeFailed || !mPacketProtectionKey0) {
+    return MOZQUIC_ERR_GENERAL;
+  }
+
+}
+                        
 
 SECStatus
 NSSHelper::BadCertificate(void *client_data, PRFileDesc *fd)
@@ -313,7 +363,7 @@ NSSHelper::NSSHelper(MozQuic *quicSession, const char *originKey)
   , mHandshakeComplete(false)
   , mHandshakeFailed(false)
   , mIsClient(false)
-  , mSymmetricKey(nullptr)
+  , mPacketProtectionKey0(nullptr)
 {
   PRNetAddr addr;
   memset(&addr,0,sizeof(addr));
@@ -376,7 +426,7 @@ NSSHelper::NSSHelper(MozQuic *quicSession, const char *originKey, bool unused)
   , mHandshakeComplete(false)
   , mHandshakeFailed(false)
   , mIsClient(true)
-  , mSymmetricKey(nullptr)
+  , mPacketProtectionKey0(nullptr)
 {
   // todo most of this can be put in an init routine shared between c/s
 

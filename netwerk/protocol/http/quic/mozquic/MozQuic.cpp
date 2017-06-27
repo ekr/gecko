@@ -1101,82 +1101,6 @@ uint32_t
 MozQuic::ProcessGeneral(unsigned char *pkt, uint32_t pktSize)
 {
 #if 0
-
-  
-  SSL_IMPORT SECStatus SSL_GetChannelInfo(PRFileDesc *fd, SSLChannelInfo *info,
-						   PRUintn len);
-sslt.h
-PRUint16 protocolVersion; SSL_LIBRARY_VERSION_TLS_1_3
-PRUint16 cipherSuite; -> one of these
-#define TLS_AES_128_GCM_SHA256                0x1301
-#define TLS_AES_256_GCM_SHA384                0x1302
-#define TLS_CHACHA20_POLY1305_SHA256          0x1303
-
-and hash sizes are 32/48 bytes
-
- http://searchfox.org/nss/source/lib/ssl/tls13hkdf.c#125
- http://searchfox.org/nss/source/gtests/ssl_gtest/tls_hkdf_unittest.cc
- http://searchfox.org/nss/source/lib/ssl/tls13con.c#4123
-
-test has key1data and key2data of 48/384
-
-initial secrets (S)
-  client_pp_secret_0 = TLS-Exporter("EXPORTER-QUIC client 1-RTT Secret",  "", Hash.length)
-  server_pp_secret_0 = TLS-Exporter("EXPORTER-QUIC server 1-RTT Secret",  "", Hash.length)
-
-/* Export keying material according to RFC 5705.
-** fd must correspond to a TLS 1.0 or higher socket and out must
-** already be allocated. If hasContext is false, it uses the no-context
-** construction from the RFC and ignores the context and contextLen
-** arguments.
-*/
-SSL_IMPORT SECStatus SSL_ExportKeyingMaterial(PRFileDesc *fd,
-                                              const char *label,
-                                              unsigned int labelLen,
-                                              PRBool hasContext,
-                                              const unsigned char *context,
-                                              unsigned int contextLen,
-                                              unsigned char *out,
-                                              unsigned int outLen);
-
-outlen according to hash sizes from above
-
-key and iv  
-  key = HKDF-Expand-Label(S, "key", "", key_length)
-  iv  = HKDF-Expand-Label(S, "iv", "", iv_length)
-
-PRK IS A pk11symkey
-      SECStatus rv = tls13_HkdfExpandLabelRaw(prk->get(), base_hash, session_hash,
-                                            session_hash_len, label, label_len,
-                                            &output[0], output.size());
-
-base_hash = ssl_hash_sha256/384
-session_hash = "", 0
-label = "iv" or "key" and label_len is strlen
-  
-output  keylength is aead key size (16)
-#define TLS_AES_128_GCM_SHA256                0x1301
-#define TLS_AES_256_GCM_SHA384                0x1302
-#define TLS_CHACHA20_POLY1305_SHA256          0x1303
-  all are aead_128 (16)
-  
-output ivlength larger of 8 bytes or n_min 5.3 of tls
-  n_min requires rfc 5116 TODO
-  n_min is specific to aead 
-n_min for all known suites is 12
-                
-SECRETS - use tls exporters 7,5 of 1.3
- like 5705, except use hkdf instead of prf(1.2)
- 
-  
-  KEYS
-   keylength is aead key size
-  key = HKDF-Expand-Label(S, "key", "", key_length)
-  HOWTO
-  IV
-  larger of 8 bytes or n_min 5.3 of tls
-  iv  = HKDF-Expand-Label(S, "iv", "", iv_length)
-HOWTO
   
 AEAD
   TLS_AES_128_GCM_SHA256, the AEAD_AES_128_GCM function is used. SHA256 is hkdf hash
@@ -1184,8 +1108,6 @@ AEAD
   The nonce, N, is formed by combining the packet protection IV (either client_pp_iv_n or server_pp_iv_n) with the packet number. The 64 bits of the reconstructed QUIC packet number in network byte order is left-padded with zeros to the size of the IV. The exclusive OR of the padded packet number and the IV forms the AEAD nonce.
 
   The associated data, A, for the AEAD is the contents of the QUIC header, starting from the flags octet in the common header.
-
-                                    A is the quic header (long or short)
                                     
   The input plaintext, P, for the AEAD is the contents of the QUIC frame following the packet number, as described in [QUIC-TRANSPORT].
 P is the body.. the resulting C is swapped in for P

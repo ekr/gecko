@@ -22,7 +22,10 @@ public:
   ~NSSHelper() {}
   uint32_t DriveHandshake();
   bool IsHandshakeComplete() { return mHandshakeComplete; }
-    
+
+  uint32_t EncryptBlock(unsigned char *A, uint32_t ALen, unsigned char *P, uint32_t PLen,
+                        unsigned char *out); // out must be PLen in size + tag(16)
+
 private:
   static PRStatus NSPRGetPeerName(PRFileDesc *aFD, PRNetAddr*addr);
   static PRStatus NSPRGetSocketOption(PRFileDesc *aFD, PRSocketOptionData *aOpt);
@@ -43,8 +46,7 @@ private:
   bool                 mHandshakeComplete;
   bool                 mHandshakeFailed; // complete but bad above nss
   bool                 mIsClient;
-  PK11SymKey          *mSymmetricKey; // todo leaked!
-  unsigned char       mPacketProtectionKey[16];
+  PK11SymKey          *mPacketProtectionKey0;
   unsigned char       mPacketProtectionIV[12];
 };
 
